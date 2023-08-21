@@ -1,0 +1,418 @@
+---
+title: "Take-home Task"
+
+output: html_notebook
+---
+
+**Attaching necessary packages**
+
+```{r}
+
+install.packages("pacman")       
+library("pacman")   
+
+p_load(tidyverse, stats, BAS, Metrics, ggstatsplot, glue) 
+
+```
+
+**Loading data**
+
+```{r}
+product=read.csv("https://raw.githubusercontent.com/generatorofsigmaalgebra/buynomics_takehome/main/product.csv")%>%
+  select(-X)
+
+sales=read.csv("https://raw.githubusercontent.com/generatorofsigmaalgebra/buynomics_takehome/main/sales.csv")%>%
+  select(-X)
+```
+
+**Preparing data for analysis:**
+
+-   converting characters into factors
+
+-   calculating natural logarithm of the price, since we would assume linear change in sales depending on percentage change in price
+
+-   calculating natural logarithm of price per 100 grams of product, for a model with price as the only predictor - to eliminate the effect of package size on price
+
+-   creating auxiliary variables "grams_pack" - combination of all product-related categorical variables, for convenience during visualization
+
+```{r}
+ps=sales%>%
+  left_join(product, by="product_id")%>%
+  mutate(across(c(brand, flavour), ~as.factor(.)),
+         log_price=log(price),
+         log_pp100g=log(price/(volume_per_joghurt_g*packsize)*100),
+         grams_pack=paste0(volume_per_joghurt_g, "gx", packsize),
+         product=paste0(volume_per_joghurt_g, "_", packsize, "_", brand, "_", flavour))
+```
+
+All product combinations and number of entries for each of them:
+
+```{r}
+ps%>%
+  select(product)%>%
+  group_by(product)%>%
+  count()
+```
+
+**Visualisations**
+
+Unique entries for volume and package size
+
+```{r}
+gp=ps%>%
+  pull(grams_pack)%>%
+  unique()
+```
+
+Helper function for plotting
+
+```{r}
+plot_fct=function(grams_pack) {
+  
+  ps%>%
+    filter(grams_pack==grams_pack)%>%
+    ggplot(aes(x=date,
+               y=units,
+               color=flavour,
+               group=flavour))+
+    geom_line(linewidth=1)+
+    geom_line(aes(y = log_price*1000,
+                  color=flavour),
+              linetype="dashed")+
+    scale_y_continuous(sec.axis = sec_axis(~./1000, name = "log_price"))+
+    facet_wrap(~brand)+
+    ggtitle(grams_pack)+
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.title.x=element_blank(),
+          axis.text.x = element_text(angle = 45, size=7, vjust=0.2),
+          axis.title.y = element_text(size=2))
+}
+```
+
+Sales-price relation by package, brand and flavour:
+
+```{r}
+plots_grouped=lapply(gp, plot_fct)
+```
+
+```{r}
+plots_grouped[[1]]
+plots_grouped[[2]]
+plots_grouped[[3]]
+```
+
+In general, the expected relation between sales and price is observed: the lower the price, the higher the sales. Also, some cases suggest that we might expect an effect of brand and flavour on sales, e.g.:
+
+-   500gx6 package of Ja! with straciatella flavour sells better than blueberry-flavoured, whereas prices are comparable
+
+-   1000gx6 chocolate Müller sells better than e.g. strawberry Danone and raspberry Ecke-Mit-Was-Drin: this effect may be effect of either brand or flavour or even their interaction
+
+To visually examine the impact of packaging, consider the following plot:
+
+```{r}
+ps %>%
+  ggplot(aes(x = date,
+             y = units,
+             color = grams_pack,
+             group = grams_pack)) +
+  geom_line() +
+  geom_line(aes(y = log_pp100g * 1000, # For scaling
+                color = grams_pack),
+            linetype = "dashed") +
+  scale_y_continuous(sec.axis = sec_axis(~./1000, name = "log_pp100g")) +
+  facet_wrap(~paste0(brand, "_", flavour)) +
+  ggtitle("Units sold (solid), log(price per 100g) (dashed)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, size = 7, vjust = 0.2)
+  )
+
+```
+
+There are only two brand-flavour combinations with different package options: strawberry Danone (1000gx6 and 150gx1) and chocolate Oikos (500gx6 and 1000gx1). Interestingly, for both these products the higher-priced options sell better, suggesting packaging effect on sales.
+
+Sales-price plots for each product separately:
+
+```{r}
+ps%>%
+  ggplot(aes(x=date,
+             y=units,
+             color=as.factor(product_id)))+
+  geom_line(group = 1)+
+  geom_line(aes(y = log_pp100g*1000, # For scaling
+                color=as.factor(product_id)),
+            linetype="dashed",
+            group = 1)+
+  scale_y_continuous(sec.axis = sec_axis(~./1000, name = "log_pp100g"))+
+  facet_wrap(~paste0(volume_per_joghurt_g, "_", packsize, "_", brand, "_", flavour))+
+  ggtitle("Units sold (solid), log(price per 100g) (dashed)")+
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, size=7, vjust=0.2))
+```
+
+Here we can also see general negative relation between price and sales, as one could expect.
+
+**Prediction of units sold**
+
+Dependent variable and predictors:
+
+-   For the prediction of sales, we will consider multiple sets of predictors, keeping in mind price as the main one
+
+-   As stated previously, we suppose log-linear relation between price and sales, so the natural logarithm of price is used
+
+-   For models including package-related variables, we use log of the original price, whereas for the models without such regressors we use log of calculated price per 100 grams of joghurt to eliminate price differences across package variations
+
+-   Apart from models with categorical regressors, we will also build models with their interactions. Here we suppose only grams\*pack and product\*flavour interactions,\
+    as other interactions seem unlikely
+
+Model specifications:
+
+-   We will employ two simple model specifications: polynomial regression and Bayesian polynomial regression. Polynomial fit is used instead of linear to account for further nonlinearities between price-percentage and sales-linear change
+
+-   We also provide 95% confidence intervals for predictions
+
+Train-test split
+
+The dataset is rather small: there are minimum 7 and maximum 10 entries per product. Also, data is imbalanced across categorical variables, so using even stratified cross validation may results in too few samples in each fold - instead, we will resort to such train-test split which ensures all product combinations' appearance in both train and test set:
+
+```{r}
+
+test_prop=1/3 #Proportion of test data
+
+ps=ps%>%
+  mutate()%>%
+  group_by(product_id)%>%
+  mutate(set=case_when(row_number()>ceiling(max(row_number())*(1-test_prop)) ~ "test",
+                       TRUE ~ "train"),
+         key="actual")
+
+train=ps%>%
+  filter(set=="train")%>%
+  mutate(log_price=log_price)
+
+test=ps%>%
+  filter(set=="test")
+```
+
+Polynomial regression
+
+We will consider the total of 12 models with various combinations of variables, their interactions and polynomial terms:\
+
+```{r}
+model_formulas=c("units~poly(log_price, degree=2)+brand+flavour+volume_per_joghurt_g+packsize",
+                 "units~poly(log_price, degree=2)+brand*flavour+volume_per_joghurt_g*packsize",
+                 "units~poly(log_price, degree=2)+volume_per_joghurt_g+packsize",
+                 "units~poly(log_price, degree=2)+volume_per_joghurt_g*packsize",
+                 "units~poly(log_pp100g, degree=2)+brand+flavour",
+                 "units~poly(log_pp100g, degree=2)+brand*flavour",
+                 
+                 "units~poly(log_price, degree=3)+brand+flavour+volume_per_joghurt_g+packsize",
+                 "units~poly(log_price, degree=3)+brand*flavour+volume_per_joghurt_g*packsize",
+                 "units~poly(log_price, degree=3)+volume_per_joghurt_g+packsize",
+                 "units~poly(log_price, degree=3)+volume_per_joghurt_g*packsize",
+                 "units~poly(log_pp100g, degree=3)+brand+flavour",
+                 "units~poly(log_pp100g, degree=3)+brand*flavour")
+```
+
+Function that implements models and produces predictions as well as MAPE
+
+```{r}
+
+predictions=list()
+
+
+prediction_fct = function(formula) {
+  
+  
+  lin_reg <<- lm(formula,
+                 data = train)
+  
+  lin_reg_pred <<- data.frame(units=predict(lin_reg,
+                                           newdata = test,
+                                           interval="prediction"),
+                             key="prediction_lr")%>%
+    rename(units=units.fit)
+  
+  
+  b_reg <<- bas.lm(model_formulas[[1]],
+                   prior="hyper-g",
+                   method="MCMC+BAS",
+                   data = train)
+  
+  
+  
+  b_reg_pred <<- confint(predict(b_reg,
+                         newdata = test,
+                         mc.cores = 1,
+                         se.fit=TRUE),
+                 parm="pred")%>%
+    matrix(ncol=3)%>%
+    data.frame()%>%
+    `colnames<-`(c("units.lwr",
+                   "units.upr",
+                   "units"))%>%
+    mutate(key="prediction_br")
+  
+  
+  result <<- rbind(ps,
+                 rbind(cbind(test %>%
+                               select(-units,
+                                      -key),
+                             lin_reg_pred),
+                       cbind(test %>%
+                               select(-units,
+                                      -key),
+                             b_reg_pred))) 
+
+  
+  
+  model_predictions=c("prediction_lr",
+                      "prediction_br")
+  
+  
+  err_total_fct=function(model_prediction) {
+    
+    err_total<<-round(mape(result%>%
+                   ungroup()%>%
+                   filter(set=="test",
+                          key==model_prediction)%>%
+                   pull(units),
+                 result%>%
+                   ungroup()%>%
+                   filter(set=="test",
+                          key=="actual")%>%
+                   pull(units)), 2)
+    err_total
+  }
+  
+  err_total<<-lapply(c("prediction_lr",
+                       "prediction_br"),
+                     err_total_fct)
+  
+  
+  
+  products=ps%>%
+    pull(product)%>%
+    unique()
+  
+  product_ids=ps%>%
+    pull(product_id)%>%
+    unique
+  
+  
+  
+  err_fct=function(model_prediction, prod) {
+    
+    err=round(mape(result%>%
+                     ungroup()%>%
+                     filter(set=="test",
+                            key==model_prediction,
+                            product==prod)%>%
+                     pull(units),
+                   result%>%
+                     ungroup()%>%
+                     filter(set=="test",
+                            key=="actual",
+                            product==prod)%>%
+                     pull(units)), 2)
+  
+    
+    
+  }
+  
+  err_lst <<- list()
+  
+  for (k in 1:length(model_predictions)) {
+    err_lst[[model_predictions[k]]] <- list() 
+  }
+  
+  for (k in 1:length(model_predictions)) {
+    for (l in 1:length(products)) {
+      err = err_fct(model_predictions[k], products[l])
+      err_lst[[model_predictions[k]]][[products[l]]] = err
+    }
+  }
+
+
+  
+  pred_plot_fct=function(prod) {
+    
+
+    plt=result%>%
+      filter(product==prod)%>%
+      ggplot(aes(x=date,
+                 y=units,
+                 color=key,
+                 group=key))+
+      geom_line()+
+      geom_ribbon(aes(ymin=units.lwr,
+                      ymax=units.upr,
+                      x=date,
+                      fill = key),
+                  alpha = 0.1)+
+      labs(title=prod,
+      subtitle=glue("MAPE Linear Regression: {err_lst[[1]][[prod]]},
+                     MAPE Bayesian Regression: {err_lst[[2]][[prod]]}"))+
+      theme(axis.text.x = element_blank(),
+            axis.title.x=element_blank(),
+            plot.title = element_text(size=8, face = "bold"),
+            plot.subtitle = element_text(size=6))
+    
+    plt 
+    
+  }
+  
+  prediction_plot<<-lapply(products, pred_plot_fct)
+  
+}
+
+```
+
+Iterating over model specifications and storing results in a list
+
+```{r warning=FALSE}
+
+for (i in 1:length(model_formulas)) {
+  
+  prediction_fct(model_formulas[[i]])
+  
+  
+  predictions[["lr"]][["models"]][[i]]=lin_reg
+  predictions[["lr"]][["total_error"]]=err_total[[1]]
+  
+  predictions[["br"]][["models"]][[i]]=b_reg
+  predictions[["br"]][["total_error"]]=err_total[[2]]
+  
+  predictions[["results_combined"]][[i]]=result
+  predictions[["plots_combined"]][[i]]=prediction_plot
+  
+  
+}
+```
+
+Because we are interested in the prediction accuracy, we will choose best model specifications based on MAPE for the whole dataset (across all products)
+
+```{r warning=FALSE}
+
+best_model_lr_id=which.min(unlist(predictions[["lr"]][["total_error"]]))
+best_model_br_id=which.min(unlist(predictions[["br"]][["total_error"]]))
+
+print(best_model_lr_id)
+print(best_model_br_id)
+```
+
+For both models the best MAPE-based specification is the first formula.
+
+Predictions produced by the best models:
+
+```{r warning=FALSE}
+
+combine_plots(predictions[["plots_combined"]][[best_model_lr_id]],
+              annotation.args = list(subtitle=paste0("Linear Regression MAPE on the whole dataset:", " ", predictions[["lr"]][["total_error"]][[best_model_lr_id]], ", ",
+                                                     "Bayesian Regression MAPE on the whole dataset:", " ", predictions[["br"]][["total_error"]][[best_model_br_id]])),
+              theme = theme(plot.subtitle = element_text(size = 30)))
+```
+
+Despite very similar predictions, a model with Bayesian formulation produces lower MAPE on the whole dataset - for this problem, it would be our model of choice.
